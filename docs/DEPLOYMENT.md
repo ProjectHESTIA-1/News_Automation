@@ -61,8 +61,10 @@ Consequences worth knowing:
   to the log.
 - Collection now always runs with `--review require`, so an unreachable model
   fails the run instead of filing a day unscored.
-- The button is hidden unless `GITHUB_DISPATCH_TOKEN` is set. Everything else
-  in the dashboard works without it.
+- The button always renders. Without `GITHUB_DISPATCH_TOKEN` it explains what
+  is missing instead of disappearing — a control that vanishes when
+  misconfigured looks like a bug in the page. Everything else in the dashboard
+  works without the token.
 
 ---
 
@@ -71,7 +73,7 @@ Consequences worth knowing:
 ```
         Render                 GitHub Actions              Supabase
    ┌──────────────┐          ┌────────────────┐         ┌──────────┐
-   │  Next.js     │          │ daily  06:00   │         │ Postgres │
+   │  Next.js     │          │ daily  17:10   │         │ Postgres │
    │  dashboard   │          │ rotate Mon 12  │────────▶│ Auth     │
    │              │          │ on demand      │         │ RLS      │
    │  publishable │─────────▶│                │         └──────────┘
@@ -164,7 +166,7 @@ address. More moving parts, no exposed surface.
 
 Screening one article is a small prompt in and a short JSON object out, but on
 CPU-only hardware a 8B model still takes tens of seconds. At 50 articles a day
-that is a run measured in tens of minutes — fine for a 06:00 cron, slow for a
+that is a run measured in tens of minutes — fine for an unattended daily cron, slow for a
 button press. The ingest workflow allows 120 minutes and sets `LLM_TIMEOUT=300`
 for that reason. A smaller model, or a GPU instance, is the lever if runs start
 timing out.
@@ -382,8 +384,31 @@ costs nothing.
 
 GitHub cron is UTC and ignores daylight saving, so a single expression drifts
 an hour twice a year. Each workflow is scheduled at both offsets and decides
-whether to act: ingest checks the local hour, and `rotate_week.py` already
-refuses unless it is Monday at or after noon **and** the week has ended.
+which of the two should act.
+
+**Neither may decide by reading the clock.** GitHub's scheduler is best-effort
+and routinely starts these runs *hours* after the cron time — four to nine
+hours, in this repository's history. Ingest originally asked "is it 06:00
+right now?", which is only true if the job starts on time; it never did, so
+sixty consecutive scheduled runs skipped the collection and reported success
+in twenty seconds.
+
+So each workflow gates on something a delay cannot change:
+
+- **ingest** compares `github.event.schedule` — the cron expression that
+  triggered the run, fixed when the run is created — against whichever UTC
+  hour corresponds to `LOCAL_TIME` today. Exactly one line matches. Anything
+  unexpected fails *open* and collects: a duplicate run inserts nothing,
+  because deduplication drops already-stored articles before the model is
+  called, whereas a skipped run loses a day of news.
+- **`rotate_week.py`** refuses unless it is Monday at or after noon **and**
+  the week has ended — a window, which tolerates arriving late.
+
+A consequence worth stating plainly: 17:10 is when the run is *triggered*, not
+when it starts. Articles are filed by `effective_date`, not by run time, so a
+late run still puts each article on its own day — the queue just fills later
+in the evening. Making the start time punctual requires a different trigger
+(an external scheduler calling `workflow_dispatch`), not a different gate.
 
 ---
 
