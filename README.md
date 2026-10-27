@@ -262,8 +262,8 @@ retry or misfire cannot cut a week short.
 ### On a schedule
 
 ```cron
-# Collect and screen every morning
-0 6 * * *  cd /path/to/repo && .venv/bin/python worker/scripts/ingest.py
+# Collect and screen every afternoon
+10 17 * * *  cd /path/to/repo && .venv/bin/python worker/scripts/ingest.py
 
 # Close the week Monday at noon, after the post goes out
 0 12 * * 1 cd /path/to/repo && .venv/bin/python worker/scripts/rotate_week.py

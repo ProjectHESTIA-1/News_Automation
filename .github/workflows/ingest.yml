@@ -2,7 +2,7 @@ name: Collect articles
 
 # Collects NYC news, screens it with the model, and files it for review.
 #
-# Runs every morning, and on demand — the dashboard's "Collect new articles"
+# Runs every afternoon, and on demand — the dashboard's "Collect new articles"
 # button triggers this same workflow rather than spawning a local process.
 #
 # The model runs ON THE RUNNER by default: Ollama is installed, the weights are
@@ -13,10 +13,17 @@ name: Collect articles
 # Setting the OLLAMA_URL secret switches to a hosted instance instead.
 on:
   schedule:
-    # 06:00 America/New_York. GitHub cron is UTC and does not follow daylight
-    # saving, so this is scheduled twice; the job itself decides whether to run.
-    - cron: "0 10 * * *"   # 06:00 EDT
-    - cron: "0 11 * * *"   # 06:00 EST
+    # 17:10 America/New_York. GitHub cron is UTC and does not follow daylight
+    # saving, so this is scheduled twice — once correct in EDT, once in EST —
+    # and the gate below lets through whichever matches today's offset.
+    #
+    # Keep both lines consistent with LOCAL_TIME in the job env: the gate
+    # derives the correct one from it, so changing the time means changing all
+    # three. Minute 10 rather than 0 is deliberate — GitHub documents the top
+    # of the hour as its highest-load window, and these runs already queue for
+    # hours behind it.
+    - cron: "10 21 * * *"   # 17:10 EDT
+    - cron: "10 22 * * *"   # 17:10 EST
   workflow_dispatch:
     inputs:
       limit:
@@ -58,6 +65,9 @@ jobs:
       # per article for judgement that is not obviously better at this task.
       OLLAMA_MODEL: ${{ vars.OLLAMA_MODEL || 'llama3.2:3b' }}
       TIMEZONE: ${{ vars.TIMEZONE || 'America/New_York' }}
+      # The local time the daily collection is scheduled for. Must match the
+      # two cron lines above.
+      LOCAL_TIME: "17:10"
       LLM_TIMEOUT: "300"
 
     steps:
@@ -72,20 +82,49 @@ jobs:
       - name: Install dependencies
         run: pip install -r worker/requirements.txt
 
-      # A scheduled run fires on both cron lines; only one of them is 06:00
-      # locally. A dispatched run always proceeds.
+      # A scheduled run fires on both cron lines, but only one of them lands on
+      # LOCAL_TIME in the newsroom's zone. A dispatched run always proceeds.
+      #
+      # This keys off WHICH cron line fired, not off the clock. github.event
+      # .schedule is fixed when the run is created, so it survives any delay —
+      # and GitHub's scheduler is routinely hours late here. The previous
+      # version asked "is it 06:00 right now?", which is only true if the job
+      # starts on time; it never was, so 60 consecutive scheduled runs skipped
+      # the collection and reported success in 20 seconds.
       - name: Should this run proceed?
         id: gate
+        env:
+          FIRED: ${{ github.event.schedule }}
         run: |
-          if [ "${GITHUB_EVENT_NAME}" != "schedule" ]; then
+          set -euo pipefail
+
+          # A dispatched run — the dashboard button, or the Actions tab.
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          hour=$(TZ="$TIMEZONE" date +%H)
-          if [ "$hour" = "06" ]; then
+
+          # Which UTC hour is LOCAL_TIME here today? 21 on EDT, 22 on EST.
+          want=$(TZ=UTC date -d "TZ=\"$TIMEZONE\" $LOCAL_TIME" +%-H)
+          # "10 21 * * *" -> "21". Field 2 of a cron expression is the hour.
+          fired=$(printf '%s' "${FIRED:-}" | awk '{print $2}')
+
+          # Fail open on anything unexpected. A duplicate run costs runner
+          # minutes and inserts nothing — deduplication drops what is already
+          # stored before the model is called. A skipped run costs a day of
+          # news. The old gate failed closed, which is why it was invisible.
+          if ! printf '%s' "$fired" | grep -Eq '^[0-9]{1,2}$'; then
+            echo "No usable cron hour in the event payload (schedule='${FIRED:-}') — collecting rather than skipping."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 10# because $((08)) is an octal parse error, not 8.
+          if [ "$((10#$fired))" -eq "$((10#$want))" ]; then
+            echo "Fired by the ${fired}:00 UTC line, which is $LOCAL_TIME in $TIMEZONE today."
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Local time is ${hour}:00, not 06:00 — skipping this trigger."
+            echo "Fired by the ${fired}:00 UTC line, but $LOCAL_TIME in $TIMEZONE is ${want}:00 UTC today — the other line does this run."
             echo "run=false" >> "$GITHUB_OUTPUT"
           fi
 
